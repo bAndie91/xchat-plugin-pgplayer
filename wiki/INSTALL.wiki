@@ -1,0 +1,14 @@
+#summary How to install
+
+= Installation =
+
+  # Copy the plugin to the dedicated location of xchat!
+{{{
+cp pgp-layer.pl ~/.xchat2/plugins/
+}}}
+  # Start xchat,
+  * the plugin will autoload.
+  * if not, load it manually:
+{{{
+/load .xchat2/plugins/pgp-layer.pl
+}}}

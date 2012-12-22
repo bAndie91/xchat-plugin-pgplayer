@@ -1,0 +1,3 @@
+#summary Where the idea came from
+
+Idea of this feature first came from *jackbrownhf* at irc.freenode.net.

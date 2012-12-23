@@ -1,0 +1,28 @@
+#summary Use of pgp-layer plugin in xchat2
+
+= Provided commands =
+
+{{{
+/PGP IDENT [keyID] [passphrase]
+}}}
+
+You set up you gpg keypair for signing and for enrcypt messages to you.
+keyID can be a hex number or email address of your secret key.
+Omit keyID to use the first key on your keyring.
+Omit passphrase to pop up zenity prompting passphrase.
+
+It is possibile and comfortable to save whole PGP IDENT command even with passphrase into Xchat's autorun place, but consider it carefully.
+
+Type {{{ PGP IDENT 0 mY seCrEt pa55phrAse }}} to use first privkey and supply a passphrase.
+
+Identities are per-network. You can use different gpg key on each network.
+If you omit keyID or passphrase, the plugin try to find an already used key (on other networks) and its already entered password.
+
+{{{
+/PGP START
+}}}
+
+Now you can initialize an encrypted session with a user in a dialog/query window.
+It will done PGP IDENT if you didn't yet.
+User with the session is going to be established must also use pgp-layer plugin.
+You should have your partner's public key.

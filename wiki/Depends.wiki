@@ -5,6 +5,7 @@
 You should install:
   * gnupg
   * libgnupg-perl
+  * libhash-case-perl
 
 Optional:
   * zenity (for separated password input)

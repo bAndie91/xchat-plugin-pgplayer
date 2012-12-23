@@ -28,6 +28,7 @@ $gpg_header = "-----BEGIN PGP MESSAGE-----\n";
 $gpg_tail = "\n-----END PGP MESSAGE-----";
 %SESS = ();	# pgp encrypted dialog sessions
 %PASS = ();	# passphrase(s) of own secret key(s)
+$PrependChrs = '';	# prepend this chars (usually color and format codes) for encrypted messages
 
 
 Xchat::register("pgp-layer", $VER, "Pretty Good Privacy Layer under IRC", \&unload);
@@ -45,8 +46,7 @@ push @Hooks, Xchat::hook_print("Private Message to Dialog", \&decrypt_filter);
 #push @Hooks, Xchat::hook_print("Private Message", \&decrypt_filter);
 push @Hooks, Xchat::hook_print("Change Nick", \&change_name);
 push @Hooks, Xchat::hook_print("Your Nick Changing", \&change_name);
-push @Hooks, Xchat::hook_command("PGP", \&ctl, {
-	'help_text' => <<EOF
+$Help = <<EOF
 PGP SHOW    show your PGP identity
     IDENT [keyID] [passphrase]
             set your PGP identity by secret GPG key,
@@ -54,10 +54,14 @@ PGP SHOW    show your PGP identity
     AUTO    enable auto negotiation when QUERY somebody
     START   initialize PGP session manually
     STOP    close session, switch back to cleartext
-    DUMP    print plugin data to stderr
+    COLOR <code> | SHOW
+            set/show format chars with which encrypted
+            messages are colored and formatted
+    DUMP, DEBUG, NODEBUG      print debug data to stderr
     SEND    internal use
+http://code.google.com/p/xchat-plugin-pgplayer/wiki/Usage
 EOF
-		});
+push @Hooks, Xchat::hook_command("PGP", \&ctl, { 'help_text' => $Help });
 
 
 
@@ -391,9 +395,9 @@ sub decrypt_filter {
 	@{$SESS{$network}->{$partner}->{'decrypt_buffer'}} = ();
 	if(defined $decrypted) {
 		if($decrypted =~ s/^\/me\s+//) {
-			emit_print("Private Action to Dialog", $partner, $decrypted);
+			emit_print("Private Action to Dialog", $partner, $PrependChrs.$decrypted);
 		} else {
-			emit_print("Private Message to Dialog", $partner, $decrypted);
+			emit_print("Private Message to Dialog", $partner, $PrependChrs.$decrypted);
 		}
 	}
 	else {
@@ -446,9 +450,20 @@ sub ctl {
 		}
 	}
 	elsif(/^stop$/) {
-		delete $SESS{$network}->{$partner};
-		yell "PGP session closed with $partner";
-		Xchat::command("NCTCP $partner PGPLAYER 0");
+		if(uc $_[0][2] eq "FORCE" or scalar @{$SESS{$network}->{$partner}->{'decrypt_buffer'}} == 0) {
+			delete $SESS{$network}->{$partner};
+			yell "PGP session closed with $partner";
+			Xchat::command("NCTCP $partner PGPLAYER 0");
+		} else {
+			yell "$partner is transferring something at the moment. Enter /PGP STOP FORCE";
+		}
+	}
+	elsif(/^colou?r$/) {
+		if(uc $_[0][2] eq "SHOW") {
+			Xchat::print($PrependChrs."Encrypted messages look like this.");
+		} else {
+			$PrependChrs = $_[1][2];
+		}
 	}
 	elsif(/^(no)?debug$/) {
 		$DEBUG = $1 ? 0 : 1;
@@ -460,13 +475,13 @@ sub ctl {
 		command("SAY $_") for @encrypted;
 		$SESS{$network}->{$partner}->{'speaking_base64'} = 0;
 		if($msgtext =~ s/^\/me\s+//i) {
-			emit_print("Your Action", get_info('nick'), $msgtext);
+			emit_print("Your Action", get_info('nick'), $PrependChrs.$msgtext);
 		} else {
-			emit_print("Your Message", get_info('nick'), $msgtext);
+			emit_print("Your Message", get_info('nick'), $PrependChrs.$msgtext);
 		}
 	}
 	else {
-		yell "IDENT, SHOW, AUTO, START, STOP, DUMP, DEBUG, NODEBUG";
+		Xchat::print($Help);
 	}
 	return EAT_ALL;
 }

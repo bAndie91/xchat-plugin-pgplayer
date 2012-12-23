@@ -6,6 +6,7 @@
 {{{
 cp pgp-layer.pl ~/.xchat2/plugins/
 }}}
+  # Install Depends
   # Start xchat,
   * the plugin will autoload.
   * if not, load it manually:

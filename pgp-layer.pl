@@ -15,6 +15,8 @@ sub yell { Xchat::print("\cC08".$_[0]); }
 $VER = 0.1;
 $auto_neg = 0;
 $MAXMSGLEN = 400;	# 512 - length(overhead) # FIXME
+# ignore keyring managers
+/KEYRING/ and delete $ENV{$_}  for keys %ENV;
 $GPG = new GnuPG();
 @key_servers = qw{
 	hkp://pgp.mit.edu
@@ -30,7 +32,7 @@ $gpg_tail = "\n-----END PGP MESSAGE-----";
 
 Xchat::register("pgp-layer", $VER, "Pretty Good Privacy Layer under IRC", \&unload);
 
-push @Hooks, Xchat::hook_print("Server Connected", \&set_self_ident);
+##push @Hooks, Xchat::hook_print("Server Connected", \&set_self_ident);
 push @Hooks, Xchat::hook_command("QUERY", \&handshake_1);
 ##push @Hooks, Xchat::hook_print("Open Dialog", \&handshake_1);
 push @Hooks, Xchat::hook_print("CTCP Send", \&nego_filter_1);
@@ -124,38 +126,61 @@ sub passphrase_dialog {
 sub set_self_ident {
 	my $network = get_info('network');
 	my $nick = get_info('nick');
-	my $mykeyid = shift;
+	my $keyname = shift;
 	my @priv_ring = gpg_key_list(1);
-	unless($mykeyid) {
-		$mykeyid = $priv_ring[0]->{'keyid'};
+	my %priv_ring_by_email = map { $_->{'email'} => $_ } @priv_ring;
+	my %priv_ring_by_keyid = map { $_->{'keyid'} => $_ } @priv_ring;
+	my %details = ();
+
+	if(not $keyname) {
+		# use secret key if defined on other network
+		N:for$N(keys %SESS) {
+		    for(keys %{$SESS{$N}}) {
+			if($SESS{$N}->{$_}->{'own'}) {
+				%details = %{$priv_ring_by_keyid{ $SESS{$N}->{$_}->{'key_id'} }};
+				last N;
+			}
+		    }
+		}
+		if(scalar(keys%details)<1 and scalar(@priv_ring)>0) {
+			# default secret key is 1st on keyring
+			%details = %{$priv_ring[0]};
+		}
 	}
-	my $result = key_exists($mykeyid, 1);
-	if($result) {
-		my %detail = map { $_->{'keyid'} => $_ } @priv_ring;
-		my $realname = $detail{$mykeyid}->{'realname'};
-		my $email = $detail{$mykeyid}->{'email'};
+	elsif($keyname =~ /^[0-9A-F]{8}$/  and  defined $priv_ring_by_keyid{$keyname}) {
+		%details = %{$priv_ring_by_keyid{$keyname}};
+	}
+	elsif(defined $priv_ring_by_email{$keyname}) {
+		%details = %{$priv_ring_by_email{$keyname}};
+	}
+	if(scalar(keys%details)<1) {
+		yell "Error: secret key unavailable.";
+		return EAT_NONE;
+	}
+
+	my $mykeyid = $details{'keyid'};
+	my $realname = $details{'realname'};
+	my $email = $details{'email'};
+
 	
-		if( $mykeyid ne $SESS{$network}->{$nick}->{'key_id'} ) {
+	my $pass = shift || $PASS{$mykeyid} || passphrase_dialog("GPG Passphrase", "Enter passphrase for secret key 0x$mykeyid ($realname <$email>)");
+	if( test_secret_key($mykeyid, $pass) ) {
+		if( defined $SESS{$network}->{$nick}->{'key_id'} and $mykeyid ne $SESS{$network}->{$nick}->{'key_id'} ) {
 			for(keys %{$SESS{$network}}) {
 				# drop encrypt-buffers for the old private key
 				delete $SESS{$network}->{$_}->{'decrypt_buffer'};
-				# close live sessions
+				# fresh key ID on live sessions
 				Xchat::command("NCTCP $_ PGPLAYER $VER KEYID=$mykeyid")  if $SESS{$network}->{$_}->{'key_id'};
 			}
 		}
 		$SESS{$network}->{$nick}->{'key_id'} = $mykeyid;
-		
-		my $pass = shift || $PASS{$mykeyid} || passphrase_dialog("GPG Passphrase", "Enter passphrase for secret key 0x$mykeyid ($realname <$email>)");
-		if( test_secret_key($mykeyid, $pass) ) {
-			$PASS{$mykeyid} = $pass;
-			yell "Identity changed: 0x$mykeyid - $realname <$email>";
-		} else {
-			yell "Can not use this key. (Wrong passphrase?)";
-		}
+		$SESS{$network}->{$nick}->{'own'} = 1;
+		$PASS{$mykeyid} = $pass;
+		yell "Identity changed: 0x$mykeyid - $realname <$email>";
+	} else {
+		yell "Can not use this key. (Wrong passphrase?)";
 	}
-	else {
-		yell "Error: secret key 0x$mykeyid unavailable.";
-	}
+
 	return EAT_NONE;
 }
 sub handshake_1 {
@@ -183,8 +208,9 @@ sub handshake_2 {
 		my $mykeyid = $SESS{$network}->{get_info('nick')}->{'key_id'};
 		if($mykeyid) {
 			command("NCTCP $partner PGPLAYER $VER KEYID=$mykeyid");
-			command("CTCP $partner PGPLAYER")
-				unless $SESS{$network}->{$partner}->{'key_id'};
+			if(not $SESS{$network}->{$partner}->{'key_id'} and $SESS{$network}->{$partner}->{'last_missing_pubkey_time'}<time-5) {
+				command("CTCP $partner PGPLAYER");
+			}
 		}
 		else {
 			Xchat::set_context($partner);
@@ -220,7 +246,8 @@ sub handshake_3 {
 				yell "PGP encrypted session initialized with $partner ($realname <$email>, 0x$partner_key_id)";
 			} else {
 				$SESS{$network}->{$partner}->{'key_id'} = undef;
-				yell "You haven't $partner's public key: 0x$partner_key_id";
+				$SESS{$network}->{$partner}->{'last_missing_pubkey_time'} = time;
+				yell "You haven't $partner"."'s public key: 0x$partner_key_id";
 				# FIXME: fetch...
 			}
 			return EAT_ALL;
@@ -380,6 +407,7 @@ sub ctl {
 	$_ = lc $_[0][1];
 	my $network = get_info('network');
 	my $partner = get_info('channel');
+	my $nick = get_info('nick');
 	if(/^dump$/) {
 		print STDERR Dumper {"Auto negotiation"=>$auto_neg, "Max message length"=>$MAXMSGLEN, "Debugging"=>$DEBUG}, \%SESS;
 	}
@@ -387,7 +415,7 @@ sub ctl {
 		set_self_ident($_[0][2], $_[1][3]);
 	}
 	elsif(/^show$/) {
-		my $keyid = $SESS{$network}->{get_info('nick')}->{'key_id'};
+		my $keyid = $SESS{$network}->{$nick}->{'key_id'};
 		if($keyid) {
 			my %detail = map { $_->{'keyid'} => $_ } gpg_key_list(2);
 			my $realname = $detail{$keyid}->{'realname'};
@@ -406,11 +434,15 @@ sub ctl {
 		$auto_neg = 1;
 	}
 	elsif(/^start$/) {
-		if(context_type($partner, $network) == 3) {
-			# offering PGP session to a user (type 3)
-			Xchat::command("CTCP $partner PGPLAYER");
-		} else {
-			yell "Session can be establish only with individual users.";
+		set_self_ident($_[0][2], $_[1][3])  unless $SESS{$network}->{$nick}->{'key_id'};
+		if($SESS{$network}->{$nick}->{'key_id'}) {
+			if(context_type($partner, $network) == 3) {
+				# offering PGP session to a user (type 3)
+				Xchat::command("CTCP $partner PGPLAYER");
+			} else {
+				yell "Session can be establish only with individual users.";
+			}
+
 		}
 	}
 	elsif(/^stop$/) {

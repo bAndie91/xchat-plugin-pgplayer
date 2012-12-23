@@ -12,7 +12,7 @@ use utf8;
 sub yell { Xchat::print("\cC08".$_[0]); }
 
 
-$VER = 0.1;
+$VER = 0.2;
 $auto_neg = 0;
 $MAXMSGLEN = 400;	# 512 - length(overhead) # FIXME
 # ignore keyring managers

@@ -332,8 +332,8 @@ sub gpg_decrypt {
 	my $ciphertext_len = length $ciphertext;
 	my $mykeyid = $SESS{get_info('network')}->{get_info('nick')}->{'key_id'};
 	
-	$ciphertext =~ s/.{64}/$&\n/g;
 	$ciphertext =~ s/=[^=]+$/\n$&/;
+	$ciphertext =~ s/.{64}/$&\n/g;
 	$ciphertext = $gpg_header.$ciphertext.$gpg_tail;
 	my $ts0 = scalar gettimeofday;
 	
@@ -386,7 +386,7 @@ sub decrypt_filter {
 	return EAT_ALL if $partial;
 	
 	my $buf = join '', @{$SESS{$network}->{$partner}->{'decrypt_buffer'}};
-	print STDERR "slices = ".scalar(@{$SESS{$network}->{$partner}->{'decrypt_buffer'}})."\n"   if $DEBUG;
+	print STDERR Dumper "slices", \@{$SESS{$network}->{$partner}->{'decrypt_buffer'}}   if $DEBUG;
 	my $decrypted = gpg_decrypt $buf;
 	@{$SESS{$network}->{$partner}->{'decrypt_buffer'}} = ();
 	if(defined $decrypted) {

@@ -12,4 +12,4 @@ Type {{{ /PGP START }}} on a query (dialog) chat tab/window!
 
 = Does pgp-layer plugin follow nick change on established sessions? =
 
-Only if you are on same chennel as your peer. (ie. you got "Change Nick" event)
+Only if you are on common channel with your peer. (ie. you got "Change Nick" event)

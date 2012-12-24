@@ -29,7 +29,7 @@ $Pref_ref = eval { retrieve($conf_file) };
 		hkp://pgp.mit.edu
 	}],
 );
-for(keys%Defaults) { $Pref{$_} = $Defaults{$_} unless defined $Pref{$_} }
+for(keys%Defaults) { $Pref{$_} = $Defaults{$_} unless exists $Pref{$_} }
 $gpg_header = "-----BEGIN PGP MESSAGE-----\n";
 $gpg_tail = "\n-----END PGP MESSAGE-----";
 

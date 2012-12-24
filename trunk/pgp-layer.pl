@@ -29,6 +29,7 @@ $gpg_tail = "\n-----END PGP MESSAGE-----";
 %SESS = ();	# pgp encrypted dialog sessions
 %PASS = ();	# passphrase(s) of own secret key(s)
 $PrependChrs = '';	# prepend this chars (usually color and format codes) for encrypted messages
+$ModeChr = '§';		# UMODE char indicating pgp-layed message
 
 
 Xchat::register("pgp-layer", $VER, "Pretty Good Privacy Layer under IRC", \&unload);
@@ -47,20 +48,21 @@ push @Hooks, Xchat::hook_print("Private Message to Dialog", \&decrypt_filter);
 push @Hooks, Xchat::hook_print("Change Nick", \&change_name);
 push @Hooks, Xchat::hook_print("Your Nick Changing", \&change_name);
 $Help = <<EOF
-PGP SHOW    show your PGP identity
+PGP SHOW    show your and peer's PGP identity
     IDENT [keyID] [passphrase]
-            set your PGP identity by secret GPG key,
-            default key is the first one on your keyring
-    AUTO    enable auto negotiation when QUERY somebody
-    START   initialize PGP session manually
+            change your PGP identity by secret GPG key
+    AUTO    enable auto negotiation when you QUERY somebody
+    START   initialize PGP session with a user
     STOP    close session, switch back to cleartext
     COLOR <code> | SHOW
             set/show format chars with which encrypted
             messages are colored and formatted
+    CHAR <chr>     set UMODE char for pgp-layed messages
     DUMP, DEBUG, NODEBUG      print debug data to stderr
     SEND    internal use
 http://code.google.com/p/xchat-plugin-pgplayer/wiki/Usage
 EOF
+;
 push @Hooks, Xchat::hook_command("PGP", \&ctl, { 'help_text' => $Help });
 
 
@@ -387,17 +389,20 @@ sub decrypt_filter {
 	my $msg = $_[0][1];
 	my $partial = $msg =~ s/\\$//;
 	push @{$SESS{$network}->{$partner}->{'decrypt_buffer'}}, $msg;
+	$SESS{$network}->{$partner}->{'slice0_time'} = scalar(gettimeofday)
+		if scalar @{$SESS{$network}->{$partner}->{'decrypt_buffer'}} == 1;
 	return EAT_ALL if $partial;
 	
 	my $buf = join '', @{$SESS{$network}->{$partner}->{'decrypt_buffer'}};
-	print STDERR Dumper "slices", \@{$SESS{$network}->{$partner}->{'decrypt_buffer'}}   if $DEBUG;
+	print STDERR Dumper "slices", \@{$SESS{$network}->{$partner}->{'decrypt_buffer'}},
+			    sprintf( "flood delay = %.2f sec", scalar(gettimeofday) - $SESS{$network}->{$partner}->{'slice0_time'})    if $DEBUG;
 	my $decrypted = gpg_decrypt $buf;
 	@{$SESS{$network}->{$partner}->{'decrypt_buffer'}} = ();
 	if(defined $decrypted) {
 		if($decrypted =~ s/^\/me\s+//) {
-			emit_print("Private Action to Dialog", $partner, $PrependChrs.$decrypted);
+			emit_print("Private Action to Dialog", $partner, $PrependChrs.$decrypted, $ModeChr);
 		} else {
-			emit_print("Private Message to Dialog", $partner, $PrependChrs.$decrypted);
+			emit_print("Private Message to Dialog", $partner, $PrependChrs.$decrypted, $ModeChr);
 		}
 	}
 	else {
@@ -444,7 +449,7 @@ sub ctl {
 				# offering PGP session to a user (type 3)
 				Xchat::command("CTCP $partner PGPLAYER");
 			} else {
-				yell "Session can be establish only with individual users.";
+				yell "Session can be established only with individual users.";
 			}
 
 		}
@@ -460,10 +465,13 @@ sub ctl {
 	}
 	elsif(/^colou?r$/) {
 		if(uc $_[0][2] eq "SHOW") {
-			Xchat::print($PrependChrs."Encrypted messages look like this.");
+			emit_print("Private Message to Dialog", "pgp_plugin", $PrependChrs."Encrypted messages look like this.", $ModeChr);
 		} else {
 			$PrependChrs = $_[1][2];
 		}
+	}
+	elsif(/^char$/) {
+		$ModeChr = $_[1][2];
 	}
 	elsif(/^(no)?debug$/) {
 		$DEBUG = $1 ? 0 : 1;
@@ -475,9 +483,9 @@ sub ctl {
 		command("SAY $_") for @encrypted;
 		$SESS{$network}->{$partner}->{'speaking_base64'} = 0;
 		if($msgtext =~ s/^\/me\s+//i) {
-			emit_print("Your Action", get_info('nick'), $PrependChrs.$msgtext);
+			emit_print("Your Action", get_info('nick'), $PrependChrs.$msgtext, $ModeChr);
 		} else {
-			emit_print("Your Message", get_info('nick'), $PrependChrs.$msgtext);
+			emit_print("Your Message", get_info('nick'), $PrependChrs.$msgtext, $ModeChr);
 		}
 	}
 	else {

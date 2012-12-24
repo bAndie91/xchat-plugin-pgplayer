@@ -9,34 +9,43 @@ use GnuPG::Tie::Encrypt;
 use GnuPG::Tie::Decrypt;
 use Time::HiRes qw/gettimeofday/;
 use utf8;
+use Storable;
 sub yell { Xchat::print("\cC08".$_[0]); }
 
 
 $VER = 0.2;
-$auto_neg = 0;
-$MAXMSGLEN = 400;	# 512 - length(overhead) # FIXME
-# ignore keyring managers
-/KEYRING/ and delete $ENV{$_}  for keys %ENV;
-$GPG = new GnuPG();
-@key_servers = qw{
-	hkp://pgp.mit.edu
-};
+yell "loading PGP layer plugin ver $VER";
 
-
-yell "loading PGP layer plugin.";
+$conf_file = get_info('xchatdir')."/pgp-layer.conf";
+$Pref_ref = eval { retrieve($conf_file) };
+%Pref = %$Pref_ref   if ref $Pref_ref eq 'HASH';
+%Defaults = (
+	'MAXMSGLEN' => 400,	# 512 - length(overhead) # FIXME
+	'DEBUG' => 0,
+	'auto_neg' => 0,
+	'PrependChrs' => '',	# prepend this chars (usually color and format codes) for encrypted messages
+	'ModeChr' => '§',	# UMODE char indicating pgp-layed message
+	'key_servers' => [qw{
+		hkp://pgp.mit.edu
+	}],
+);
+for(keys%Defaults) { $Pref{$_} = $Defaults{$_} unless defined $Pref{$_} }
 $gpg_header = "-----BEGIN PGP MESSAGE-----\n";
 $gpg_tail = "\n-----END PGP MESSAGE-----";
+
+
+# ignore keyring managers
+/KEYRING/ and delete $ENV{$_}  for keys%ENV;
+$GPG = new GnuPG();
 %SESS = ();	# pgp encrypted dialog sessions
 %PASS = ();	# passphrase(s) of own secret key(s)
-$PrependChrs = '';	# prepend this chars (usually color and format codes) for encrypted messages
-$ModeChr = '§';		# UMODE char indicating pgp-layed message
 
 
 Xchat::register("pgp-layer", $VER, "Pretty Good Privacy Layer under IRC", \&unload);
 
 ##push @Hooks, Xchat::hook_print("Server Connected", \&set_self_ident);
 push @Hooks, Xchat::hook_command("QUERY", \&handshake_1);
-##push @Hooks, Xchat::hook_print("Open Dialog", \&handshake_1);
+push @Hooks, Xchat::hook_print("Open Dialog", \&handshake_1);	# FIXME
 push @Hooks, Xchat::hook_print("CTCP Send", \&nego_filter_1);
 push @Hooks, Xchat::hook_print("CTCP Generic", \&handshake_2);
 push @Hooks, Xchat::hook_print("Notice", \&handshake_3);
@@ -54,11 +63,10 @@ PGP SHOW    show your and peer's PGP identity
     AUTO    enable auto negotiation when you QUERY somebody
     START   initialize PGP session with a user
     STOP    close session, switch back to cleartext
-    COLOR <code> | SHOW
-            set/show format chars with which encrypted
-            messages are colored and formatted
+    COLOR <code>   set format and color codes with which
+            encrypted messages are colored and formatted
     CHAR <chr>     set UMODE char for pgp-layed messages
-    DUMP, DEBUG, NODEBUG      print debug data to stderr
+    DUMP, DEBUG, NODEBUG       print debug data (to stderr)
     SEND    internal use
 http://code.google.com/p/xchat-plugin-pgplayer/wiki/Usage
 EOF
@@ -67,6 +75,7 @@ push @Hooks, Xchat::hook_command("PGP", \&ctl, { 'help_text' => $Help });
 
 
 
+sub save_pref { return store(\%Pref, $conf_file); }
 sub key_exists {
 	my $keyid = shift;
 	my $secret = shift || 0;
@@ -194,7 +203,7 @@ sub handshake_1 {
 	
 	if( $SESS{get_info('network')}->{get_info('nick')}->{'key_id'} ) {
 		my $partner = $_[0][1];
-		if($auto_neg) {
+		if($Pref{'auto_neg'}) {
 			Xchat::command("CTCP $partner PGPLAYER");
 		}
 	}
@@ -302,12 +311,14 @@ sub gpg_encrypt {
 	# arg 2 - encrypt for this user
 	# arg 3 - sign by this key - OPTIONAL
 	# arg 4 - passphrase for signing key - OPTIONAL
+	# arg 5 - reference to a scalar decrypt time stored in - OPTIONAL
 	
 	my $cleartext = shift;
 	my $recipient_keyid = shift;
 	my $network = get_info('network');
 	my $mykeyid = shift || $SESS{$network}->{get_info('nick')}->{'key_id'};
 	my $pass = shift || $PASS{$mykeyid};
+	my $ts_ref = shift;
 	my $ts0 = scalar gettimeofday;
 	
 	my $ciphertext = eval q{
@@ -323,20 +334,22 @@ sub gpg_encrypt {
 		$ciphertext;
 	};
 	my $ts = scalar(gettimeofday)-$ts0;
-	print STDERR Dumper $cleartext, $ciphertext, $@   if $DEBUG;
+	$$ts_ref = $ts   if ref $ts_ref eq 'SCALAR';
+	print STDERR Dumper $cleartext, $ciphertext, $@   if $Pref{'DEBUG'};
 
 	$ciphertext =~ s/^.*?(\r?\n\r?\n)//s;
 	$ciphertext =~ s/----.*$//s;
 	$ciphertext =~ s/[\r\n]//g;
 	
 	my $ovrh = length($ciphertext)*100/length($cleartext) - 100;
-	print STDERR sprintf("encrypt time = %.2f sec\noverhead = %.0f%%\n", $ts, $ovrh)   if $DEBUG;
+	print STDERR sprintf("encrypt time = %.2f sec\noverhead = %.0f%%\n", $ts, $ovrh)   if $Pref{'DEBUG'};
 	return $ciphertext;
 }
 sub gpg_decrypt {
 	my $ciphertext = shift;
 	my $ciphertext_len = length $ciphertext;
 	my $mykeyid = $SESS{get_info('network')}->{get_info('nick')}->{'key_id'};
+	my $ts_ref = shift;
 	
 	$ciphertext =~ s/=[^=]+$/\n$&/;
 	$ciphertext =~ s/.{64}/$&\n/g;
@@ -354,12 +367,13 @@ sub gpg_decrypt {
 		$cleartext;
 	};
 	my $ts = scalar(gettimeofday)-$ts0;
+	$$ts_ref = $ts   if ref $ts_ref eq 'SCALAR';
 	
-	print STDERR Dumper $ciphertext, $cleartext, $@   if $DEBUG;
+	print STDERR Dumper $ciphertext, $cleartext, $@   if $Pref{'DEBUG'};
 	# FIXME: verify sign
 		
 	my $ovrh = $ciphertext_len*100/length($cleartext) - 100   unless $cleartext eq '';
-	print STDERR sprintf("decrypt time = %.2f sec\noverhead = %.0f%%\n", $ts, $ovrh)   if $DEBUG;
+	print STDERR sprintf("decrypt time = %.2f sec\noverhead = %.0f%%\n", $ts, $ovrh)   if $Pref{'DEBUG'};
 	return $cleartext;
 }
 
@@ -373,7 +387,7 @@ sub partitize {
 	my @slices = ();
 	push @slices, $&."\\"  while s/.{$length}//;
 	push @slices, $_;
-	print STDERR "slices = ".scalar(@slices)."\n"   if $DEBUG;
+	print STDERR "slices = ".scalar(@slices)."\n"   if $Pref{'DEBUG'};
 	return @slices;
 }
 
@@ -393,16 +407,20 @@ sub decrypt_filter {
 		if scalar @{$SESS{$network}->{$partner}->{'decrypt_buffer'}} == 1;
 	return EAT_ALL if $partial;
 	
+	my $flood_delay = scalar(gettimeofday) - $SESS{$network}->{$partner}->{'slice0_time'};
+	my $slices = scalar @{$SESS{$network}->{$partner}->{'decrypt_buffer'}};
+	print STDERR Dumper "slices", \@{$SESS{$network}->{$partner}->{'decrypt_buffer'}}, sprintf("flood delay = %.2f sec", $flood)    if $Pref{'DEBUG'};
+	my $t_dec;
+
 	my $buf = join '', @{$SESS{$network}->{$partner}->{'decrypt_buffer'}};
-	print STDERR Dumper "slices", \@{$SESS{$network}->{$partner}->{'decrypt_buffer'}},
-			    sprintf( "flood delay = %.2f sec", scalar(gettimeofday) - $SESS{$network}->{$partner}->{'slice0_time'})    if $DEBUG;
-	my $decrypted = gpg_decrypt $buf;
+	my $decrypted = gpg_decrypt($buf, \$t_dec);
 	@{$SESS{$network}->{$partner}->{'decrypt_buffer'}} = ();
 	if(defined $decrypted) {
+		my $Append = $Pref{'DEBUG'} ? sprintf("\cO \cB\cC02[\cO\cC15slc=%d; d_fld=%.2f; t_dec=%.2f\cB\cC02]", $slices, $flood_delay, $t_dec) : '';
 		if($decrypted =~ s/^\/me\s+//) {
-			emit_print("Private Action to Dialog", $partner, $PrependChrs.$decrypted, $ModeChr);
+			emit_print("Private Action to Dialog", $partner, $Pref{'PrependChrs'}.$decrypted.$Append, $Pref{'ModeChr'});
 		} else {
-			emit_print("Private Message to Dialog", $partner, $PrependChrs.$decrypted, $ModeChr);
+			emit_print("Private Message to Dialog", $partner, $Pref{'PrependChrs'}.$decrypted.$Append, $Pref{'ModeChr'});
 		}
 	}
 	else {
@@ -418,7 +436,7 @@ sub ctl {
 	my $partner = get_info('channel');
 	my $nick = get_info('nick');
 	if(/^dump$/) {
-		print STDERR Dumper {"Auto negotiation"=>$auto_neg, "Max message length"=>$MAXMSGLEN, "Debugging"=>$DEBUG}, \%SESS;
+		print STDERR Dumper \%Pref, \%SESS;
 	}
 	elsif(/^ident$/) {
 		set_self_ident($_[0][2], $_[1][3]);
@@ -438,9 +456,11 @@ sub ctl {
 		} else {
 			yell "PGP unconfigured on this network. Enter /PGP IDENT [keyID] [passphrase]";
 		}
+		emit_print("Private Message to Dialog", "pgp_plugin", $Pref{'PrependChrs'}."Encrypted messages look like this.", $Pref{'ModeChr'});
 	}
 	elsif(/^auto$/) {
-		$auto_neg = 1;
+		$Pref{'auto_neg'} = 1;
+		save_pref;
 	}
 	elsif(/^start$/) {
 		set_self_ident($_[0][2], $_[1][3])  unless $SESS{$network}->{$nick}->{'key_id'};
@@ -457,35 +477,38 @@ sub ctl {
 	elsif(/^stop$/) {
 		if(uc $_[0][2] eq "FORCE" or scalar @{$SESS{$network}->{$partner}->{'decrypt_buffer'}} == 0) {
 			delete $SESS{$network}->{$partner};
-			yell "PGP session closed with $partner";
 			Xchat::command("NCTCP $partner PGPLAYER 0");
+			yell "PGP session closed with $partner";
 		} else {
 			yell "$partner is transferring something at the moment. Enter /PGP STOP FORCE";
 		}
 	}
 	elsif(/^colou?r$/) {
-		if(uc $_[0][2] eq "SHOW") {
-			emit_print("Private Message to Dialog", "pgp_plugin", $PrependChrs."Encrypted messages look like this.", $ModeChr);
-		} else {
-			$PrependChrs = $_[1][2];
-		}
+		$Pref{'PrependChrs'} = $_[1][2];
+		save_pref;
 	}
 	elsif(/^char$/) {
-		$ModeChr = $_[1][2];
+		$Pref{'ModeChr'} = $_[1][2];
+		save_pref;
 	}
 	elsif(/^(no)?debug$/) {
-		$DEBUG = $1 ? 0 : 1;
+		$Pref{'DEBUG'} = $1 ? 0 : 1;
+		save_pref;
 	}
 	elsif(/^send$/) {
 		my $msgtext = $_[1][2];
-		my @encrypted = partitize ( gpg_encrypt ($msgtext, $SESS{$network}->{$partner}->{'key_id'}), $MAXMSGLEN );
-		$SESS{$network}->{$partner}->{'speaking_base64'} = 1;
-		command("SAY $_") for @encrypted;
-		$SESS{$network}->{$partner}->{'speaking_base64'} = 0;
+		my $t_enc;
+		my @encrypted = partitize ( gpg_encrypt ($msgtext, $SESS{$network}->{$partner}->{'key_id'}, undef, undef, \$t_enc), $Pref{'MAXMSGLEN'} );
+		  
+		  $SESS{$network}->{$partner}->{'speaking_base64'} = 1;
+		  command("SAY $_") for @encrypted;
+		  $SESS{$network}->{$partner}->{'speaking_base64'} = 0;
+		  
+		my $Append = $Pref{'DEBUG'} ? sprintf("\cO \cB\cC02[\cO\cC15t_enc=%.2f; slc=%d\cB\cC02]", $t_enc, scalar @encrypted) : '';
 		if($msgtext =~ s/^\/me\s+//i) {
-			emit_print("Your Action", get_info('nick'), $PrependChrs.$msgtext, $ModeChr);
+			emit_print("Your Action", get_info('nick'), $Pref{'PrependChrs'}.$msgtext.$Append, $Pref{'ModeChr'});
 		} else {
-			emit_print("Your Message", get_info('nick'), $PrependChrs.$msgtext, $ModeChr);
+			emit_print("Your Message", get_info('nick'), $Pref{'PrependChrs'}.$msgtext.$Append, $Pref{'ModeChr'});
 		}
 	}
 	else {
@@ -513,6 +536,7 @@ sub unload {
 		%_ = %$_;
 		if(defined $SESS{$_{'network'}}->{$_{'channel'}}->{'key_id'}) {
 			Xchat::set_context($_{'channel'}, $_{'server'});
+			Xchat::command("NCTCP $_{'channel'} PGPLAYER 0");
 			yell "PGP session closed with $_{'channel'}";
 		}
 	}

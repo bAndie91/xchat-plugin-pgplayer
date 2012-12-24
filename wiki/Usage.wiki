@@ -13,7 +13,7 @@ Omit passphrase to pop up zenity prompting passphrase.
 
 It is possibile and comfortable to save whole PGP IDENT command even with passphrase into Xchat's autorun place, but consider it carefully.
 
-Type {{{ PGP IDENT 0 mY seCrEt pa55phrAse }}} to use first privkey and supply a passphrase.
+Type {{{ /PGP IDENT 0 mY seCrEt pa55phrAse }}} to use first privkey and supply a passphrase.
 
 Identities are per-network. You can use different gpg key on each network.
 If you omit keyID or passphrase, the plugin try to find an already used key (on other networks) and its already entered password.

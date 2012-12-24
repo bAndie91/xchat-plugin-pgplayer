@@ -1,0 +1,15 @@
+#summary Frequently Asked Questions
+
+= How to start pgp encrypt most quickly? =
+
+Type {{{ /PGP START }}} on a query (dialog) chat tab/window!
+
+= How do i use my secondary secret key for signing? =
+
+{{{
+/PGP IDENT my_other@key.net
+}}}
+
+= Does pgp-layer plugin follow nick change on established sessions? =
+
+Only if you are on same chennel as your peer. (ie. you got "Change Nick" event)

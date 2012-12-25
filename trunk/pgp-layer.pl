@@ -140,7 +140,7 @@ sub set_self_ident {
 		delete $SESS{$network}->{$nick};
 		for(keys %{$SESS{$network}}) {
 			# close session with partners
-			Xchat::command("NCTCP $_ PGPLAYER 0")  if $SESS{$network}->{$_}->{'key_id'};
+			command("NCTCP $_ PGPLAYER 0")  if $SESS{$network}->{$_}->{'key_id'};
 			delete $SESS{$network}->{$_}->{'key_id'};
 			yell "PGP session closed with $_";
 		}
@@ -190,7 +190,7 @@ sub set_self_ident {
 				# drop encrypt-buffers for the old private key
 				delete $SESS{$network}->{$_}->{'decrypt_buffer'};
 				# fresh key ID on live sessions
-				Xchat::command("NCTCP $_ PGPLAYER $VER KEYID=$mykeyid")  if $SESS{$network}->{$_}->{'key_id'};	# comment out to hide when you change your signing key
+				command("NCTCP $_ PGPLAYER $VER KEYID=$mykeyid")  if $SESS{$network}->{$_}->{'key_id'};	# comment out to hide when you change your sign
 			}
 		}
 		$SESS{$network}->{$nick}->{'key_id'} = $mykeyid;
@@ -208,7 +208,7 @@ sub handshake_1 {
 	
 	if( $SESS{get_info('network')}->{get_info('nick')}->{'key_id'} and $Pref{'auto_neg'} ) {
 		my $partner = $_[0][1];
-		Xchat::command("CTCP $partner PGPLAYER");
+		command("CTCP $partner PGPLAYER");
 	}
 	return EAT_NONE;
 }
@@ -275,6 +275,20 @@ sub handshake_3 {
 }
 
 
+sub escape {
+	my $_ = ${$_[0]};
+	s/\\/\\\\/g;
+	s/\n/\\n/g;
+	s/\r/\\r/g;
+	${$_[0]} = $_;
+}
+sub unescape {
+	my $_ = ${$_[0]};
+	s/\\r/\r/g;
+	s/\\n/\n/g;
+	s/\\\\/\\/g;
+	${$_[0]} = $_;
+}
 sub history {
 	my $keycode = $_[0][0];
 	my $modifier = $_[0][1];
@@ -282,11 +296,12 @@ sub history {
 	my $inputbox = get_info("inputbox");
 
 	if(($modifier & 13) == 0) {
-		# Enter key, not command
+		# We pressed Enter key and there is not a command
 		if($char eq "\r" and $inputbox =~ /^([^\/]|\/me\s)/i) {
 		  
 		  	# Rewrite entered message text (or /ME action)
 			if( $SESS{get_info('network')}->{get_info('channel')}->{'key_id'} ) {
+				escape \$inputbox;
 				command("SETTEXT /PGP SEND $inputbox");
 			}
 		}
@@ -298,6 +313,7 @@ sub history {
 			$replacetimer = Xchat::hook_timer(3, sub {
 				if(get_info("inputbox") =~ /^\/PGP SEND /) {
 					my $text = $';
+					unescape \$text;
 					command("SETTEXT $text");
 					command("SETCURSOR ".length($text));
 				}
@@ -414,7 +430,8 @@ sub decrypt_filter {
 	$SESS{$network}->{$partner}->{'slice0_time'} = scalar(gettimeofday)   if 1 == scalar @$buff_ref;
 	return EAT_ALL if $partial;
 	
-	my $flood_delay = scalar(gettimeofday) - $SESS{$network}->{$partner}->{'slice0_time'};
+	my $t = scalar(gettimeofday);
+	my $flood_delay = $t - $SESS{$network}->{$partner}->{'slice0_time'};
 	shift @d_fld  if scalar @d_fld >= 5;
 	push @d_fld, $flood_delay;
 	my $slices = scalar @$buff_ref;
@@ -426,16 +443,26 @@ sub decrypt_filter {
 	my $decrypted = gpg_decrypt($buf, \$t_dec, \%sign_result);
 	@$buff_ref = ();
 
-	my $Append = $Pref{'DEBUG'} ? sprintf("\cO \cB\cC02[\cO\cC15slc=%d; d_fld=%.2f; t_dec=%.2f\cB\cC02]", $slices, $flood_delay, $t_dec) : '';
+	my $Append = $Pref{'DEBUG'} ? sprintf("\cO \cB\cC02[\cO\cC15slc=%d; d_fld=%.2f; t_dec=%.2f; age=%.2f\cB\cC02]", $slices, $flood_delay, $t_dec, $t - $sign_result{'timestamp'}) : '';
+
 	if($sign_result{'keyid'} ne $SESS{$network}->{$partner}->{'key_id'}) {
-		$Append .= $Pref{'DEBUG'} ? (" \cC150x".$sign_result{'keyid'}." != 0x".$SESS{$network}->{$partner}->{'key_id'}) : '';
-		emit_print("Private Message to Dialog", '3rd_person', "\cC05\cBWARNING:\cB \037Sign mismatch\cO ".$Pref{'PrependChrs'}.$decrypted.$Append, $Pref{'ModeChr'});
+		$Append .= $Pref{'DEBUG'} ? " \cO\cC15".($sign_result{'keyid'} ? ("signed by \cB".$sign_result{'user'}."\cB, 0x".$sign_result{'keyid'}) : "sign not known") : '';
+		for(split /\n/, $decrypted) {
+			emit_print("Private Message to Dialog", '3rd_person', "\cC05\cBWARNING:\cB \037Sign mismatch\cO ".$Pref{'PrependChrs'}.$_.$Append, $Pref{'ModeChr'});
+			undef $Append;
+		}
 	}
 	elsif(defined $decrypted) {
 		if($decrypted =~ s/^\/me\s+//) {
-			emit_print("Private Action to Dialog", $partner, $Pref{'PrependChrs'}.$decrypted.$Append, $Pref{'ModeChr'});
+			for(split /\n/, $decrypted) {
+				emit_print("Private Action to Dialog", $partner, $Pref{'PrependChrs'}.$_.$Append, $Pref{'ModeChr'});
+				undef $Append;
+			}
 		} else {
-			emit_print("Private Message to Dialog", $partner, $Pref{'PrependChrs'}.$decrypted.$Append, $Pref{'ModeChr'});
+			for(split /\n/, $decrypted) {
+				emit_print("Private Message to Dialog", $partner, $Pref{'PrependChrs'}.$_.$Append, $Pref{'ModeChr'});
+				undef $Append;
+			}
 		}
 	}
 	else {
@@ -496,7 +523,7 @@ sub ctl {
 		if($SESS{$network}->{$nick}->{'key_id'}) {
 			if(context_type($partner, $network) == 3) {
 				# offering PGP session to a user (type 3)
-				Xchat::command("CTCP $partner PGPLAYER");
+				command("CTCP $partner PGPLAYER");
 			} else {
 				yell "Session can be established only with individual users.";
 			}
@@ -506,7 +533,7 @@ sub ctl {
 	elsif(/^stop$/) {
 		if(uc $_[0][2] eq "FORCE" or scalar @{$SESS{$network}->{$partner}->{'decrypt_buffer'}} == 0) {
 			delete $SESS{$network}->{$partner};
-			Xchat::command("NCTCP $partner PGPLAYER 0");
+			command("NCTCP $partner PGPLAYER 0");
 			yell "PGP session closed with $partner";
 		} else {
 			yell "$partner is transferring something at the moment. Enter /PGP STOP FORCE";
@@ -526,6 +553,7 @@ sub ctl {
 	}
 	elsif(/^send$/) {
 		my $msgtext = $_[1][2];
+		unescape \$msgtext;
 		my $t_enc;
 		my $encrypted = gpg_encrypt ( $msgtext, $SESS{$network}->{$partner}->{'key_id'}, undef, undef, \$t_enc );
 		if($encrypted) {
@@ -537,9 +565,15 @@ sub ctl {
 
 			my $Append = $Pref{'DEBUG'} ? sprintf("\cO \cB\cC02[\cO\cC15t_enc=%.2f; slc=%d\cB\cC02]", $t_enc, scalar @encrypted) : '';
 			if($msgtext =~ s/^\/me\s+//i) {
-				emit_print("Your Action", get_info('nick'), $Pref{'PrependChrs'}.$msgtext.$Append, $Pref{'ModeChr'});
+				for(split /\n/, $msgtext) {
+					emit_print("Your Action", get_info('nick'), $Pref{'PrependChrs'}.$_.$Append, $Pref{'ModeChr'});
+					undef $Append;
+				}
 			} else {
-				emit_print("Your Message", get_info('nick'), $Pref{'PrependChrs'}.$msgtext.$Append, $Pref{'ModeChr'});
+				for(split /\n/, $msgtext) {
+					emit_print("Your Message", get_info('nick'), $Pref{'PrependChrs'}.$_.$Append, $Pref{'ModeChr'});
+					undef $Append;
+				}
 			}
 		} else {
 			yell "Error: GPG mechanism broken. Try to re-enter passphrase by /PGP IDENT"
@@ -571,7 +605,7 @@ sub unload {
 		for $P (keys %{$SESS{$N}}) {
 			Xchat::set_context($P, $server_by_network{$N});
 			if($SESS{$N}->{$P}->{'key_id'} and not $SESS{$N}->{$P}->{'own'}) {
-				Xchat::command("NCTCP $P PGPLAYER 0");
+				command("NCTCP $P PGPLAYER 0");
 				yell "PGP session closed with $P";
 			}
 		}

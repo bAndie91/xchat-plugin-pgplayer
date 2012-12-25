@@ -6,14 +6,14 @@ use Data::Dumper;
 use Xchat qw/EAT_NONE EAT_ALL EAT_XCHAT EAT_PLUGIN get_info command emit_print/;
 use GnuPG;
 use GnuPG::Tie::Encrypt;
-use GnuPG::Tie::Decrypt;
+#use GnuPG::Tie::Decrypt;
 use Time::HiRes qw/gettimeofday/;
 use utf8;
 use Storable;
 sub yell { Xchat::print("\cC08".$_[0]); }
 
 
-$VER = 0.2;
+$VER = 0.4;
 yell "loading PGP layer plugin ver $VER";
 
 $conf_file = get_info('xchatdir')."/pgp-layer.conf";
@@ -24,7 +24,7 @@ $Pref_ref = eval { retrieve($conf_file) };
 	'DEBUG' => 0,
 	'auto_neg' => 0,
 	'PrependChrs' => '',	# prepend this chars (usually color and format codes) for encrypted messages
-	'ModeChr' => '§',	# UMODE char indicating pgp-layed message
+	'ModeChr' => ':',	# UMODE char indicating pgp-layed message
 	'key_servers' => [qw{
 		hkp://pgp.mit.edu
 	}],
@@ -35,7 +35,7 @@ $gpg_tail = "\n-----END PGP MESSAGE-----";
 
 
 # ignore keyring managers
-/KEYRING/ and delete $ENV{$_}  for keys%ENV;
+/KEYRING|GPG_AGENT/ and delete $ENV{$_}  for keys%ENV;
 $GPG = new GnuPG();
 %SESS = ();	# pgp encrypted dialog sessions
 %PASS = ();	# passphrase(s) of own secret key(s)
@@ -43,9 +43,7 @@ $GPG = new GnuPG();
 
 Xchat::register("pgp-layer", $VER, "Pretty Good Privacy Layer under IRC", \&unload);
 
-##push @Hooks, Xchat::hook_print("Server Connected", \&set_self_ident);
 push @Hooks, Xchat::hook_command("QUERY", \&handshake_1);
-push @Hooks, Xchat::hook_print("Open Dialog", \&handshake_1);	# FIXME
 push @Hooks, Xchat::hook_print("CTCP Send", \&nego_filter_1);
 push @Hooks, Xchat::hook_print("CTCP Generic", \&handshake_2);
 push @Hooks, Xchat::hook_print("Notice", \&handshake_3);
@@ -53,21 +51,21 @@ push @Hooks, Xchat::hook_print("Key Press", \&history);
 push @Hooks, Xchat::hook_print("Your Message", \&cryptdata_filter);
 push @Hooks, Xchat::hook_print("Your Action", \&cryptdata_filter);
 push @Hooks, Xchat::hook_print("Private Message to Dialog", \&decrypt_filter);
-#push @Hooks, Xchat::hook_print("Private Message", \&decrypt_filter);
 push @Hooks, Xchat::hook_print("Change Nick", \&change_name);
 push @Hooks, Xchat::hook_print("Your Nick Changing", \&change_name);
 $Help = <<EOF
-PGP SHOW    show your and peer's PGP identity
+PGP SHOW [IDENT|COLOR|STAT]            show your and peer's identity,
+              color & formatting of pgp-layed messages and statictics
     IDENT [keyID] [passphrase]
-            change your PGP identity by secret GPG key
-    AUTO    enable auto negotiation when you QUERY somebody
-    START   initialize PGP session with a user
-    STOP    close session, switch back to cleartext
-    COLOR <code>   set format and color codes with which
-            encrypted messages are colored and formatted
-    CHAR <chr>     set UMODE char for pgp-layed messages
-    DUMP, DEBUG, NODEBUG       print debug data (to stderr)
-    SEND    internal use
+              change your PGP identity by secret GPG key
+    [NO]AUTO  enable/disalbe auto negotiation when you QUERY somebody
+    START     initialize PGP session with a user
+    STOP      close session, switch back to cleartext
+    COLOR <code>   set format and color codes with which encrypted
+                   messages colored and formatted
+    CHAR <chr>     set UMODE character for pgp-layed messages
+    DUMP, [NO]DEBUG    print debug data (to stderr, next to messages)
+    SEND      internal use
 http://code.google.com/p/xchat-plugin-pgplayer/wiki/Usage
 EOF
 ;
@@ -100,31 +98,25 @@ sub context_type {
 }
 
 sub gpg_key_list {
-	my $type = $_[0];
-	return (gpg_key_list(0), gpg_key_list(1))  if($type == 2);
+	my $gettype = $_[0];
+	return (gpg_key_list(0), gpg_key_list(1))  if($gettype == 2);
 
 	my $keyid, $created, $comment, $email, $realname, $expires;
 	my @list;
 	
-	open LIST, '-|', $GPG->{'gnupg_path'}, '--list'.($type==1?'-secret':'').'-keys', '--no-tty'   or return undef;
+	open LIST, '-|', $GPG->{'gnupg_path'}, '--list'.($gettype==1?'-secret':'').'-keys', '--with-colon', '--no-tty'   or return undef;
 	while(<LIST>) {
-		if( /^(?:sec|pub)\s+.*?\/([0-9A-F]+)\s+([0-9\/\.-]+)/ ) {
-			$keyid = $1;
-			$created = $2;
-			if( /expires:\s*([0-9\/\.-]+)/ ) {
-				$expires = $1;
-			}
-		}
-		elsif( /^uid\s+([^(<]+)(?:\((.*?)\)\s+)?(?:\<(.*?)\>)?/ ) {
-			$comment = $2;
-			$email = $3;
-			$realname = $1;
-			$realname =~ s/\s*$//;
-		}
-		if(defined $keyid and defined $realname) {
-			push @list, {'keyid'=>$keyid, 'created'=>$created, 'realname'=>$realname, 'comment'=>$comment, 'email'=>$email, 'expires'=>$expires};
-			$keyid = $created = $comment = $email = $realname = $expires = undef;;
-		}
+		my ($type, $trust, $length, $algo, $keyid, $created, $expires, $any, $any, $userdata, $any) = split ':', $_;
+		next unless $type =~ /^sec|pub$/;
+
+		$userdata =~ s/\\x([[::xdigit]]{2})/chr(hex$1)/ige;
+		$userdata =~ /([^(<]+)(?:\((.*?)\)\s+)?(?:\<(.*?)\>)?/;
+		   $comment = $2;
+		   $email = $3;
+		   $realname = $1;
+		   $realname =~ s/\s*$//;
+		
+		push @list, {'keyid'=>$keyid, 'created'=>$created, 'realname'=>$realname, 'comment'=>$comment, 'email'=>$email, 'expires'=>$expires||undef};
 	}
 	close LIST;
 	return @list
@@ -162,7 +154,7 @@ sub set_self_ident {
 			%details = %{$priv_ring[0]};
 		}
 	}
-	elsif($keyname =~ /^[0-9A-F]{8}$/  and  defined $priv_ring_by_keyid{$keyname}) {
+	elsif($keyname =~ /^(?:0x)?([0-9A-Fa-f]{16})$/  and  $keyname = uc$1  and  defined $priv_ring_by_keyid{$keyname}) {
 		%details = %{$priv_ring_by_keyid{$keyname}};
 	}
 	elsif(defined $priv_ring_by_email{$keyname}) {
@@ -201,11 +193,9 @@ sub set_self_ident {
 sub handshake_1 {
 	# Offer PGP layer establishment
 	
-	if( $SESS{get_info('network')}->{get_info('nick')}->{'key_id'} ) {
+	if( $SESS{get_info('network')}->{get_info('nick')}->{'key_id'} and $Pref{'auto_neg'} ) {
 		my $partner = $_[0][1];
-		if($Pref{'auto_neg'}) {
-			Xchat::command("CTCP $partner PGPLAYER");
-		}
+		Xchat::command("CTCP $partner PGPLAYER");
 	}
 	return EAT_NONE;
 }
@@ -229,7 +219,7 @@ sub handshake_2 {
 		}
 		else {
 			Xchat::set_context($partner);
-			yell "PGP session requested by $partner, but no secret key defined. Type /PGP IDENT [keyID] [passphrase]";
+			yell "PGP session requested by $partner, but no secret key defined. Type /PGP START [keyID] [passphrase]";
 		}
 		return EAT_ALL;
 	}
@@ -258,12 +248,12 @@ sub handshake_3 {
 				my $email = $detail{$partner_key_id}->{'email'};
 			
 				$SESS{$network}->{$partner}->{'key_id'} = $partner_key_id;
-				yell "PGP encrypted session initialized with $partner ($realname <$email>, 0x$partner_key_id)";
+				yell "PGP encrypted session initialized with $partner - $realname <$email>, 0x$partner_key_id";
 			} else {
 				$SESS{$network}->{$partner}->{'key_id'} = undef;
 				$SESS{$network}->{$partner}->{'last_missing_pubkey_time'} = time;
 				yell "You haven't $partner"."'s public key: 0x$partner_key_id";
-				# FIXME: fetch...
+				# FIXME: fetch from keyserver, check fingerprints, set trust level
 			}
 			return EAT_ALL;
 		}
@@ -349,7 +339,9 @@ sub gpg_decrypt {
 	my $ciphertext = shift;
 	my $ciphertext_len = length $ciphertext;
 	my $mykeyid = $SESS{get_info('network')}->{get_info('nick')}->{'key_id'};
+	my $expected_signer = shift;
 	my $ts_ref = shift;
+	my $sign_results;
 	
 	$ciphertext =~ s/=[^=]+$/\n$&/;
 	$ciphertext =~ s/.{64}/$&\n/g;
@@ -357,23 +349,28 @@ sub gpg_decrypt {
 	my $ts0 = scalar gettimeofday;
 	
 	my $cleartext = eval q{
-		tie *PLAINTEXT, 'GnuPG::Tie::Decrypt', passphrase => $PASS{$mykeyid};
-		print PLAINTEXT $ciphertext;
+		open CIPIN, '>';	open CIPOUT;
+		open CLRIN, '>';	open CLROUT;
+		pipe CIPOUT, CIPIN;	pipe CLROUT, CLRIN;
+		print CIPIN $ciphertext;close CIPIN;
+		$verify_ref = $GPG->decrypt( 'ciphertext' => \*CIPOUT, 'output' => \*CLRIN, 'passphrase' => $PASS{$mykeyid} );
+		close CIPOUT;		close CLRIN;
 		local $/ = undef;
-		my $cleartext = <PLAINTEXT>;
-		close PLAINTEXT;
-		untie *PLAINTEXT;
+		my $cleartext = <CLROUT>;
+		close CLROUT;
 		utf8::decode($cleartext);
 		$cleartext;
 	};
 	my $ts = scalar(gettimeofday)-$ts0;
 	$$ts_ref = $ts   if ref $ts_ref eq 'SCALAR';
 	
-	print STDERR Dumper $ciphertext, $cleartext, $@   if $Pref{'DEBUG'};
-	# FIXME: verify sign
-		
+	print STDERR Dumper $ciphertext, $cleartext, \%$verify_ref, $@   if $Pref{'DEBUG'};
 	my $ovrh = $ciphertext_len*100/length($cleartext) - 100   unless $cleartext eq '';
 	print STDERR sprintf("decrypt time = %.2f sec\noverhead = %.0f%%\n", $ts, $ovrh)   if $Pref{'DEBUG'};
+	
+	if($verify_ref->{'keyid'} ne $expected_signer) {
+		yell "Warning: \037Sign mismatch on next datagramm!\cO".($Pref{'DEBUG'} ? (" \cC150x".$verify_ref->{'keyid'}." != 0x".$expected_signer) : '');
+	}
 	return $cleartext;
 }
 
@@ -402,19 +399,22 @@ sub decrypt_filter {
 	
 	my $msg = $_[0][1];
 	my $partial = $msg =~ s/\\$//;
-	push @{$SESS{$network}->{$partner}->{'decrypt_buffer'}}, $msg;
+	my $buff_ref = \@{$SESS{$network}->{$partner}->{'decrypt_buffer'}};
+	push @$buff_ref, $msg;
 	$SESS{$network}->{$partner}->{'slice0_time'} = scalar(gettimeofday)
-		if scalar @{$SESS{$network}->{$partner}->{'decrypt_buffer'}} == 1;
+		if scalar @$buff_ref == 1;
 	return EAT_ALL if $partial;
 	
 	my $flood_delay = scalar(gettimeofday) - $SESS{$network}->{$partner}->{'slice0_time'};
-	my $slices = scalar @{$SESS{$network}->{$partner}->{'decrypt_buffer'}};
-	print STDERR Dumper "slices", \@{$SESS{$network}->{$partner}->{'decrypt_buffer'}}, sprintf("flood delay = %.2f sec", $flood)    if $Pref{'DEBUG'};
+	shift @d_fld  if scalar @d_fld >= 5;
+	push @d_fld, $flood_delay;
+	my $slices = scalar @$buff_ref;
+	print STDERR Dumper "slices", \@$buff_ref, sprintf("flood delay = %.2f sec", $flood_delay)    if $Pref{'DEBUG'};
 	my $t_dec;
 
-	my $buf = join '', @{$SESS{$network}->{$partner}->{'decrypt_buffer'}};
-	my $decrypted = gpg_decrypt($buf, \$t_dec);
-	@{$SESS{$network}->{$partner}->{'decrypt_buffer'}} = ();
+	my $buf = join '', @$buff_ref;
+	my $decrypted = gpg_decrypt($buf, $SESS{$network}->{$partner}->{'key_id'}, \$t_dec);
+	@$buff_ref = ();
 	if(defined $decrypted) {
 		my $Append = $Pref{'DEBUG'} ? sprintf("\cO \cB\cC02[\cO\cC15slc=%d; d_fld=%.2f; t_dec=%.2f\cB\cC02]", $slices, $flood_delay, $t_dec) : '';
 		if($decrypted =~ s/^\/me\s+//) {
@@ -442,8 +442,10 @@ sub ctl {
 		set_self_ident($_[0][2], $_[1][3]);
 	}
 	elsif(/^show$/) {
-		my $keyid = $SESS{$network}->{$nick}->{'key_id'};
-		if($keyid) {
+		$_ = $_[0][2];
+		if(/^ident/i or not defined) {
+		    my $keyid = $SESS{$network}->{$nick}->{'key_id'};
+		    if($keyid) {
 			my %detail = map { $_->{'keyid'} => $_ } gpg_key_list(2);
 			my $realname = $detail{$keyid}->{'realname'};
 			my $email = $detail{$keyid}->{'email'};
@@ -453,13 +455,25 @@ sub ctl {
 				$email = $detail{$keyid}->{'email'};
 				yell "Conversation with $partner - $realname <$email>, 0x$keyid - is encrypted and verified.";
 			}
-		} else {
-			yell "PGP unconfigured on this network. Enter /PGP IDENT [keyID] [passphrase]";
+		    } else {
+			yell "PGP is unconfigured on this network. Enter /PGP IDENT [keyID] [passphrase]";
+		    }
 		}
-		emit_print("Private Message to Dialog", "pgp_plugin", $Pref{'PrependChrs'}."Encrypted messages look like this.", $Pref{'ModeChr'});
+		if(/^colou?r/ or not defined) {
+		    emit_print("Private Message to Dialog", "pgp_plugin", $Pref{'PrependChrs'}."Encrypted messages look like this.", $Pref{'ModeChr'});
+		}
+		if((/^stat/ or not defined) and $cnt = scalar(@d_fld)) {
+		    Xchat::print("Flood delay of last $cnt messages: ".
+		    	join(' ', map {sprintf"%.2f",$_} @d_fld).
+		    	"; avg: ".do{
+		    		my $sum;
+		    		$sum += $_ for @d_fld;
+		    		sprintf "%.2f", $sum / $cnt;
+		    	});
+		}
 	}
-	elsif(/^auto$/) {
-		$Pref{'auto_neg'} = 1;
+	elsif(/^(no)?auto$/) {
+		$Pref{'auto_neg'} = $1 ? 0 : 1;
 		save_pref;
 	}
 	elsif(/^start$/) {
@@ -498,17 +512,22 @@ sub ctl {
 	elsif(/^send$/) {
 		my $msgtext = $_[1][2];
 		my $t_enc;
-		my @encrypted = partitize ( gpg_encrypt ($msgtext, $SESS{$network}->{$partner}->{'key_id'}, undef, undef, \$t_enc), $Pref{'MAXMSGLEN'} );
-		  
-		  $SESS{$network}->{$partner}->{'speaking_base64'} = 1;
-		  command("SAY $_") for @encrypted;
-		  $SESS{$network}->{$partner}->{'speaking_base64'} = 0;
-		  
-		my $Append = $Pref{'DEBUG'} ? sprintf("\cO \cB\cC02[\cO\cC15t_enc=%.2f; slc=%d\cB\cC02]", $t_enc, scalar @encrypted) : '';
-		if($msgtext =~ s/^\/me\s+//i) {
-			emit_print("Your Action", get_info('nick'), $Pref{'PrependChrs'}.$msgtext.$Append, $Pref{'ModeChr'});
+		my $encrypted = gpg_encrypt ( $msgtext, $SESS{$network}->{$partner}->{'key_id'}, undef, undef, \$t_enc );
+		if(defined $encrypted) {
+			my @encrypted = partitize ( $encrypted , $Pref{'MAXMSGLEN'} );
+
+			$SESS{$network}->{$partner}->{'speaking_base64'} = 1;
+			command("SAY $_") for @encrypted;
+			$SESS{$network}->{$partner}->{'speaking_base64'} = 0;
+
+			my $Append = $Pref{'DEBUG'} ? sprintf("\cO \cB\cC02[\cO\cC15t_enc=%.2f; slc=%d\cB\cC02]", $t_enc, scalar @encrypted) : '';
+			if($msgtext =~ s/^\/me\s+//i) {
+				emit_print("Your Action", get_info('nick'), $Pref{'PrependChrs'}.$msgtext.$Append, $Pref{'ModeChr'});
+			} else {
+				emit_print("Your Message", get_info('nick'), $Pref{'PrependChrs'}.$msgtext.$Append, $Pref{'ModeChr'});
+			}
 		} else {
-			emit_print("Your Message", get_info('nick'), $Pref{'PrependChrs'}.$msgtext.$Append, $Pref{'ModeChr'});
+			yell "Error: GPG mechanism broken. Try to re-enter passphrase by /PGP IDENT"
 		}
 	}
 	else {
@@ -530,7 +549,6 @@ sub change_name {
 }
 
 sub unload {
-	# FIXME: save preferences
 	my ($channel, $server) = (get_info('channel'), get_info('server'));	# set_context() takes server, not network.
 	for(Xchat::get_list('channels')) {
 		%_ = %$_;

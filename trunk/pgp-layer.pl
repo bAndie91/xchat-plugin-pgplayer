@@ -513,7 +513,7 @@ sub ctl {
 		my $msgtext = $_[1][2];
 		my $t_enc;
 		my $encrypted = gpg_encrypt ( $msgtext, $SESS{$network}->{$partner}->{'key_id'}, undef, undef, \$t_enc );
-		if(defined $encrypted) {
+		if($encrypted) {
 			my @encrypted = partitize ( $encrypted , $Pref{'MAXMSGLEN'} );
 
 			$SESS{$network}->{$partner}->{'speaking_base64'} = 1;

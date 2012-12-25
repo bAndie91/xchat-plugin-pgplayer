@@ -56,8 +56,9 @@ push @Hooks, Xchat::hook_print("Your Nick Changing", \&change_name);
 $Help = <<EOF
 PGP SHOW [IDENT|COLOR|STAT]            show your and peer's identity,
               color & formatting of pgp-layed messages and statictics
-    IDENT [keyID] [passphrase]
-              change your PGP identity by secret GPG key
+    IDENT [keyID] [passphrase]         change your PGP identity by
+              secret GPG key, put "-" as keyID to drop your identity,
+              omit passphrase to get a prompt for it
     [NO]AUTO  enable/disalbe auto negotiation when you QUERY somebody
     START     initialize PGP session with a user
     STOP      close session, switch back to cleartext
@@ -134,6 +135,18 @@ sub set_self_ident {
 	my $network = get_info('network');
 	my $nick = get_info('nick');
 	my $keyname = shift;
+	
+	if($keyname eq '-') {
+		delete $SESS{$network}->{$nick};
+		for(keys %{$SESS{$network}}) {
+			# close session with partners
+			Xchat::command("NCTCP $_ PGPLAYER 0")  if $SESS{$network}->{$_}->{'key_id'};
+			delete $SESS{$network}->{$_}->{'key_id'};
+			yell "PGP session closed with $_";
+		}
+		return EAT_NONE;
+	}
+	
 	my @priv_ring = gpg_key_list(1);
 	my %priv_ring_by_email = map { $_->{'email'} => $_ } @priv_ring;
 	my %priv_ring_by_keyid = map { $_->{'keyid'} => $_ } @priv_ring;
@@ -177,7 +190,7 @@ sub set_self_ident {
 				# drop encrypt-buffers for the old private key
 				delete $SESS{$network}->{$_}->{'decrypt_buffer'};
 				# fresh key ID on live sessions
-				Xchat::command("NCTCP $_ PGPLAYER $VER KEYID=$mykeyid")  if $SESS{$network}->{$_}->{'key_id'};
+				Xchat::command("NCTCP $_ PGPLAYER $VER KEYID=$mykeyid")  if $SESS{$network}->{$_}->{'key_id'};	# comment out to hide when you change your signing key
 			}
 		}
 		$SESS{$network}->{$nick}->{'key_id'} = $mykeyid;
@@ -339,9 +352,8 @@ sub gpg_decrypt {
 	my $ciphertext = shift;
 	my $ciphertext_len = length $ciphertext;
 	my $mykeyid = $SESS{get_info('network')}->{get_info('nick')}->{'key_id'};
-	my $expected_signer = shift;
 	my $ts_ref = shift;
-	my $sign_results;
+	my $sign_result_ref = shift;
 	
 	$ciphertext =~ s/=[^=]+$/\n$&/;
 	$ciphertext =~ s/.{64}/$&\n/g;
@@ -353,7 +365,7 @@ sub gpg_decrypt {
 		open CLRIN, '>';	open CLROUT;
 		pipe CIPOUT, CIPIN;	pipe CLROUT, CLRIN;
 		print CIPIN $ciphertext;close CIPIN;
-		$verify_ref = $GPG->decrypt( 'ciphertext' => \*CIPOUT, 'output' => \*CLRIN, 'passphrase' => $PASS{$mykeyid} );
+		$ref = $GPG->decrypt( 'ciphertext' => \*CIPOUT, 'output' => \*CLRIN, 'passphrase' => $PASS{$mykeyid} );
 		close CIPOUT;		close CLRIN;
 		local $/ = undef;
 		my $cleartext = <CLROUT>;
@@ -364,13 +376,11 @@ sub gpg_decrypt {
 	my $ts = scalar(gettimeofday)-$ts0;
 	$$ts_ref = $ts   if ref $ts_ref eq 'SCALAR';
 	
-	print STDERR Dumper $ciphertext, $cleartext, \%$verify_ref, $@   if $Pref{'DEBUG'};
+	print STDERR Dumper $ciphertext, $cleartext, \%$ref, $@   if $Pref{'DEBUG'};
 	my $ovrh = $ciphertext_len*100/length($cleartext) - 100   unless $cleartext eq '';
 	print STDERR sprintf("decrypt time = %.2f sec\noverhead = %.0f%%\n", $ts, $ovrh)   if $Pref{'DEBUG'};
 	
-	if($verify_ref->{'keyid'} ne $expected_signer) {
-		yell "Warning: \037Sign mismatch on next datagramm!\cO".($Pref{'DEBUG'} ? (" \cC150x".$verify_ref->{'keyid'}." != 0x".$expected_signer) : '');
-	}
+	%$sign_result_ref = %$ref   if ref $ref eq 'HASH';
 	return $cleartext;
 }
 
@@ -401,8 +411,7 @@ sub decrypt_filter {
 	my $partial = $msg =~ s/\\$//;
 	my $buff_ref = \@{$SESS{$network}->{$partner}->{'decrypt_buffer'}};
 	push @$buff_ref, $msg;
-	$SESS{$network}->{$partner}->{'slice0_time'} = scalar(gettimeofday)
-		if scalar @$buff_ref == 1;
+	$SESS{$network}->{$partner}->{'slice0_time'} = scalar(gettimeofday)   if 1 == scalar @$buff_ref;
 	return EAT_ALL if $partial;
 	
 	my $flood_delay = scalar(gettimeofday) - $SESS{$network}->{$partner}->{'slice0_time'};
@@ -411,12 +420,18 @@ sub decrypt_filter {
 	my $slices = scalar @$buff_ref;
 	print STDERR Dumper "slices", \@$buff_ref, sprintf("flood delay = %.2f sec", $flood_delay)    if $Pref{'DEBUG'};
 	my $t_dec;
+	my %sign_result;
 
 	my $buf = join '', @$buff_ref;
-	my $decrypted = gpg_decrypt($buf, $SESS{$network}->{$partner}->{'key_id'}, \$t_dec);
+	my $decrypted = gpg_decrypt($buf, \$t_dec, \%sign_result);
 	@$buff_ref = ();
-	if(defined $decrypted) {
-		my $Append = $Pref{'DEBUG'} ? sprintf("\cO \cB\cC02[\cO\cC15slc=%d; d_fld=%.2f; t_dec=%.2f\cB\cC02]", $slices, $flood_delay, $t_dec) : '';
+
+	my $Append = $Pref{'DEBUG'} ? sprintf("\cO \cB\cC02[\cO\cC15slc=%d; d_fld=%.2f; t_dec=%.2f\cB\cC02]", $slices, $flood_delay, $t_dec) : '';
+	if($sign_result{'keyid'} ne $SESS{$network}->{$partner}->{'key_id'}) {
+		$Append .= $Pref{'DEBUG'} ? (" \cC150x".$sign_result{'keyid'}." != 0x".$SESS{$network}->{$partner}->{'key_id'}) : '';
+		emit_print("Private Message to Dialog", '3rd_person', "\cC05\cBWARNING:\cB \037Sign mismatch\cO ".$Pref{'PrependChrs'}.$decrypted.$Append, $Pref{'ModeChr'});
+	}
+	elsif(defined $decrypted) {
 		if($decrypted =~ s/^\/me\s+//) {
 			emit_print("Private Action to Dialog", $partner, $Pref{'PrependChrs'}.$decrypted.$Append, $Pref{'ModeChr'});
 		} else {
@@ -424,8 +439,8 @@ sub decrypt_filter {
 		}
 	}
 	else {
-		yell "Can not decrypt following line:\cC $buf";
-		yell "Type /PGP STOP to hang up decrypting.";
+		yell "Can not decrypt following datagramm:\cC $buf";
+		yell "Type /PGP STOP to hang up.";
 	}
 	return EAT_ALL;
 }
@@ -442,8 +457,8 @@ sub ctl {
 		set_self_ident($_[0][2], $_[1][3]);
 	}
 	elsif(/^show$/) {
-		$_ = $_[0][2];
-		if(/^ident/i or not defined) {
+		my $subcmd = lc $_[0][2];
+		if($subcmd=~/^ident/ or not $subcmd) {
 		    my $keyid = $SESS{$network}->{$nick}->{'key_id'};
 		    if($keyid) {
 			my %detail = map { $_->{'keyid'} => $_ } gpg_key_list(2);
@@ -459,10 +474,10 @@ sub ctl {
 			yell "PGP is unconfigured on this network. Enter /PGP IDENT [keyID] [passphrase]";
 		    }
 		}
-		if(/^colou?r/ or not defined) {
+		if($subcmd=~/^colou?r/ or not $subcmd) {
 		    emit_print("Private Message to Dialog", "pgp_plugin", $Pref{'PrependChrs'}."Encrypted messages look like this.", $Pref{'ModeChr'});
 		}
-		if((/^stat/ or not defined) and $cnt = scalar(@d_fld)) {
+		if(($subcmd=~/^stat/ or not $subcmd) and $cnt = scalar(@d_fld)) {
 		    Xchat::print("Flood delay of last $cnt messages: ".
 		    	join(' ', map {sprintf"%.2f",$_} @d_fld).
 		    	"; avg: ".do{
@@ -550,12 +565,15 @@ sub change_name {
 
 sub unload {
 	my ($channel, $server) = (get_info('channel'), get_info('server'));	# set_context() takes server, not network.
-	for(Xchat::get_list('channels')) {
-		%_ = %$_;
-		if(defined $SESS{$_{'network'}}->{$_{'channel'}}->{'key_id'}) {
-			Xchat::set_context($_{'channel'}, $_{'server'});
-			Xchat::command("NCTCP $_{'channel'} PGPLAYER 0");
-			yell "PGP session closed with $_{'channel'}";
+	%server_by_network = map { $_->{'network'} => $_->{'server'} } Xchat::get_list('channels');
+	# notify partners
+	for $N (keys %SESS) {
+		for $P (keys %{$SESS{$N}}) {
+			Xchat::set_context($P, $server_by_network{$N});
+			if($SESS{$N}->{$P}->{'key_id'} and not $SESS{$N}->{$P}->{'own'}) {
+				Xchat::command("NCTCP $P PGPLAYER 0");
+				yell "PGP session closed with $P";
+			}
 		}
 	}
 	Xchat::set_context($channel, $server);

@@ -3,7 +3,7 @@
 #
 
 use Data::Dumper;
-use Xchat qw/EAT_NONE EAT_ALL EAT_XCHAT EAT_PLUGIN get_info command emit_print/;
+use Xchat qw/EAT_NONE EAT_ALL EAT_XCHAT EAT_PLUGIN get_info command emit_print set_context strip_code/;
 use GnuPG;
 use GnuPG::Tie::Encrypt;
 #use GnuPG::Tie::Decrypt;
@@ -13,7 +13,7 @@ use Storable;
 sub yell { Xchat::print("\cC08".$_[0]); }
 
 
-$VER = 0.4;
+$VER = 0.6;
 yell "loading PGP layer plugin ver $VER";
 
 $conf_file = get_info('xchatdir')."/pgp-layer.conf";
@@ -231,8 +231,8 @@ sub handshake_2 {
 			}
 		}
 		else {
-			Xchat::set_context($partner);
-			yell "PGP session requested by $partner, but no secret key defined. Type /PGP START [keyID] [passphrase]";
+			my $switched = set_context($partner);
+			yell "PGP session requested by $partner, but no secret key defined. Type /PGP ".($switched?"START":"IDENT")." [keyID] [passphrase]";
 		}
 		return EAT_ALL;
 	}
@@ -270,6 +270,15 @@ sub handshake_3 {
 			}
 			return EAT_ALL;
 		}
+		
+	# Receive delivery ACKnowladge
+	
+		elsif(/\sACK\b/) {
+			if(set_context $partner) {
+				indicator($SESS{$network}->{$partner}->{'receive'}, --$SESS{$network}->{$partner}->{'transmit'});
+			}
+			return EAT_ALL;
+		}
 	}
 	return EAT_NONE;
 }
@@ -295,12 +304,22 @@ sub history {
 	my $char = $_[0][2];
 	my $inputbox = get_info("inputbox");
 
+	if(($keycode == 65360 or $keycode == 65361) and $inputbox =~ /^(\[(receive,transmit|receive|transmit)\.{3}\] |)/) {
+		# Home/Left key pressed and there is transreceive indicator
+		Xchat::Internal::unhook($fakehometimer);
+		$fakehometimer = Xchat::hook_timer(1, sub {
+			# FIXME: It clears text selection.
+			command("SETCURSOR ".$_[0]) if get_info('state_cursor') < $_[0];
+			return Xchat::REMOVE;
+		}, { 'data' => length($&) });
+	}
 	if(($modifier & 13) == 0) {
-		# We pressed Enter key and there is not a command
+		# Enter key pressed and there is not a command
 		if($char eq "\r" and $inputbox =~ /^([^\/]|\/me\s)/i) {
 		  
 		  	# Rewrite entered message text (or /ME action)
 			if( $SESS{get_info('network')}->{get_info('channel')}->{'key_id'} ) {
+				$inputbox =~ s/^\[(receive,transmit|receive|transmit)\.{3}\] //;
 				escape \$inputbox;
 				command("SETTEXT /PGP SEND $inputbox");
 			}
@@ -310,8 +329,8 @@ sub history {
 		
 			# Replace back to original string when browsing the input history
 			Xchat::Internal::unhook($replacetimer);
-			$replacetimer = Xchat::hook_timer(3, sub {
-				if(get_info("inputbox") =~ /^\/PGP SEND /) {
+			$replacetimer = Xchat::hook_timer(1, sub {
+				if(get_info('inputbox') =~ /^\/PGP SEND /) {
 					my $text = $';
 					unescape \$text;
 					command("SETTEXT $text");
@@ -322,6 +341,21 @@ sub history {
 		}
 	}
 	return EAT_NONE;
+}
+sub indicator {
+	my @indicatee;
+	push @indicatee, "receive"   if $_[0];
+	push @indicatee, "transmit"  if $_[1];
+	
+	my $_ = get_info('inputbox');
+	s/^(\[(receive,transmit|receive|transmit)\.{3}\] |)//;
+	my $cp = get_info('state_cursor') - length($&);
+	$cp = 0 if $cp < 0;
+	my $new = (scalar @indicatee) ? "[".join(',', @indicatee)."...] " : '';
+	$cp += length($new);
+
+	command("SETTEXT $new$_");
+	command("SETCURSOR $cp");
 }
 
 
@@ -420,17 +454,26 @@ sub cryptdata_filter {
 }
 sub decrypt_filter {
 	my $network = get_info('network');
-	my $partner = $_[0][0];
+	my $partner = strip_code($_[0][0]);
 	return EAT_NONE unless $SESS{$network}->{$partner}->{'key_id'};
 	
 	my $msg = $_[0][1];
 	my $partial = $msg =~ s/\\$//;
 	my $buff_ref = \@{$SESS{$network}->{$partner}->{'decrypt_buffer'}};
 	push @$buff_ref, $msg;
-	$SESS{$network}->{$partner}->{'slice0_time'} = scalar(gettimeofday)   if 1 == scalar @$buff_ref;
-	return EAT_ALL if $partial;
-	
+	if(1 == scalar @$buff_ref) {
+		$SESS{$network}->{$partner}->{'slice0_time'} = scalar(gettimeofday);
+		$SESS{$network}->{$partner}->{'receive'}++;
+	}
+	if($partial) {
+		indicator($SESS{$network}->{$partner}->{'receive'}, $SESS{$network}->{$partner}->{'transmit'});
+		return EAT_ALL;
+	}
+
 	my $t = scalar(gettimeofday);
+	command("NCTCP $partner PGPLAYER $VER ACK");
+	indicator(--$SESS{$network}->{$partner}->{'receive'}, $SESS{$network}->{$partner}->{'transmit'});
+	
 	my $flood_delay = $t - $SESS{$network}->{$partner}->{'slice0_time'};
 	shift @d_fld  if scalar @d_fld >= 5;
 	push @d_fld, $flood_delay;
@@ -559,6 +602,8 @@ sub ctl {
 		if($encrypted) {
 			my @encrypted = partitize ( $encrypted , $Pref{'MAXMSGLEN'} );
 
+			indicator($SESS{$network}->{$partner}->{'receive'}, ++$SESS{$network}->{$partner}->{'transmit'});
+			
 			$SESS{$network}->{$partner}->{'speaking_base64'} = 1;
 			command("SAY $_") for @encrypted;
 			$SESS{$network}->{$partner}->{'speaking_base64'} = 0;
@@ -603,14 +648,14 @@ sub unload {
 	# notify partners
 	for $N (keys %SESS) {
 		for $P (keys %{$SESS{$N}}) {
-			Xchat::set_context($P, $server_by_network{$N});
+			set_context($P, $server_by_network{$N});
 			if($SESS{$N}->{$P}->{'key_id'} and not $SESS{$N}->{$P}->{'own'}) {
 				command("NCTCP $P PGPLAYER 0");
 				yell "PGP session closed with $P";
 			}
 		}
 	}
-	Xchat::set_context($channel, $server);
+	set_context($channel, $server);
 	Xchat::Internal::unhook($_) for @Hooks;
 	return 1;
 }

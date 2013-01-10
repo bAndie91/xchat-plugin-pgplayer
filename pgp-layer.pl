@@ -13,7 +13,8 @@ use Storable;
 sub yell { Xchat::print("\cC08".$_[0]); }
 
 
-$VER = 0.6;
+$VER = 0.7;
+@xchat_ver = split/\./, get_info('version');
 yell "loading PGP layer plugin ver $VER";
 
 $conf_file = get_info('xchatdir')."/pgp-layer.conf";
@@ -48,6 +49,7 @@ push @Hooks, Xchat::hook_print("CTCP Send", \&nego_filter_1);
 push @Hooks, Xchat::hook_print("CTCP Generic", \&handshake_2);
 push @Hooks, Xchat::hook_print("Notice", \&handshake_3);
 push @Hooks, Xchat::hook_print("Key Press", \&history);
+push @Hooks, Xchat::hook_print("Focus Tab", \&indicator_wrapper);
 push @Hooks, Xchat::hook_print("Your Message", \&cryptdata_filter);
 push @Hooks, Xchat::hook_print("Your Action", \&cryptdata_filter);
 push @Hooks, Xchat::hook_print("Private Message to Dialog", \&decrypt_filter);
@@ -59,7 +61,10 @@ PGP SHOW [IDENT|COLOR|STAT]            show your and peer's identity,
     IDENT [keyID] [passphrase]         change your PGP identity by
               secret GPG key, put "-" as keyID to drop your identity,
               omit passphrase to get a prompt for it
-    [NO]AUTO  enable/disalbe auto negotiation when you QUERY somebody
+    [NO]AUTO  disalbe/enable auto negotiation when you QUERY somebody
+    INDIC [MENU|FAKE|TAB|NO]         set status indicator to be shown
+              MENU: in main menu, FAKE: as fake text in input field,
+              TAB: on tab's label, NO: disable all
     START     initialize PGP session with a user
     STOP      close session, switch back to cleartext
     COLOR <code>   set format and color codes with which encrypted
@@ -183,7 +188,7 @@ sub set_self_ident {
 	my $email = $details{'email'};
 
 	
-	my $pass = shift || $PASS{$mykeyid} || passphrase_dialog("GPG Passphrase", "Enter passphrase for secret key 0x$mykeyid ($realname <$email>)");
+	my $pass = $_[0] || $PASS{$mykeyid} || passphrase_dialog("GPG Passphrase", "Enter passphrase for secret key 0x$mykeyid ($realname <$email>)");
 	if( test_secret_key($mykeyid, $pass) ) {
 		if( defined $SESS{$network}->{$nick}->{'key_id'} and $mykeyid ne $SESS{$network}->{$nick}->{'key_id'} ) {
 			for(keys %{$SESS{$network}}) {
@@ -198,6 +203,7 @@ sub set_self_ident {
 		$PASS{$mykeyid} = $pass;
 		yell "Identity changed: 0x$mykeyid - $realname <$email>";
 	} else {
+		unless($_[0]) { delete $PASS{$mykeyid}; }  # drop stored passphrase if it (may) used in "my$pass=..." (ie. no passphrase argument given) and it was wrong
 		yell "Can not use this key. (Wrong passphrase?)";
 	}
 
@@ -304,25 +310,43 @@ sub history {
 	my $char = $_[0][2];
 	my $inputbox = get_info("inputbox");
 
-	if(($keycode == 65360 or $keycode == 65361) and $inputbox =~ /^(\[(receive,transmit|receive|transmit)\.{3}\] |)/) {
+	if($inputbox =~ /^(\[(receive,transmit|receive|transmit)\.{3}\] |)/) {
+	    my $L = length($&);
+	    if($keycode == 65360 or $keycode == 65361) {
 		# Home/Left key pressed and there is transreceive indicator
 		Xchat::Internal::unhook($fakehometimer);
 		$fakehometimer = Xchat::hook_timer(1, sub {
 			# FIXME: It clears text selection.
 			command("SETCURSOR ".$_[0]) if get_info('state_cursor') < $_[0];
 			return Xchat::REMOVE;
-		}, { 'data' => length($&) });
+		}, { 'data' => $L });
+	    }
+	    elsif($keycode == 65288) {
+	    	return EAT_ALL if get_info('state_cursor') <= $L;
+	    }
 	}
 	if(($modifier & 13) == 0) {
+		$inputbox =~ s/^\[(receive,transmit|receive|transmit)\.{3}\] //;
+		
 		# Enter key pressed and there is not a command
-		if($char eq "\r" and $inputbox =~ /^([^\/]|\/me\s)/i) {
+		if($char eq "\r") {
+		    if($inputbox =~ /^([^\/]|\/me\s)/i) {
 		  
 		  	# Rewrite entered message text (or /ME action)
 			if( $SESS{get_info('network')}->{get_info('channel')}->{'key_id'} ) {
-				$inputbox =~ s/^\[(receive,transmit|receive|transmit)\.{3}\] //;
 				escape \$inputbox;
 				command("SETTEXT /PGP SEND $inputbox");
 			}
+		    }
+		    else {
+			command("SETTEXT $inputbox");
+			Xchat::Internal::unhook($indi3timer);
+			$indi3timer = Xchat::hook_timer(5, sub {
+				my ($n, $c) = (get_info('network'), get_info('channel'));
+				indicator($SESS{$n}->{$c}->{'receive'}, $SESS{$n}->{$c}->{'transmit'});
+				return Xchat::REMOVE;
+			});
+		    }
 		}
 		# Up/Down key
 		elsif($keycode == 65364 or $keycode == 65362) {
@@ -346,16 +370,39 @@ sub indicator {
 	my @indicatee;
 	push @indicatee, "receive"   if $_[0];
 	push @indicatee, "transmit"  if $_[1];
-	
-	my $_ = get_info('inputbox');
-	s/^(\[(receive,transmit|receive|transmit)\.{3}\] |)//;
-	my $cp = get_info('state_cursor') - length($&);
-	$cp = 0 if $cp < 0;
-	my $new = (scalar @indicatee) ? "[".join(',', @indicatee)."...] " : '';
-	$cp += length($new);
 
-	command("SETTEXT $new$_");
-	command("SETCURSOR $cp");
+	if( $Pref{'indicator'} ) {	
+		my $_ = get_info('inputbox');
+		s/^(\[(receive,transmit|receive|transmit)\.{3}\] |)//;
+		my $cp = get_info('state_cursor') - length($&);
+		$cp = 0 if $cp < 0;
+		my $new = (scalar @indicatee) ? "[".join(',', @indicatee)."...] " : '';
+		$cp += length($new);
+		
+		command("SETTEXT $new$_");
+		command("SETCURSOR $cp");
+	}
+	if( $Pref{'menuindicator'} ) {
+		for my $i (qw/receive transmit/) {
+		    command("MENU DEL \"$_...\"");
+		    if(grep {$i eq $_} @indicatee) {
+		    	my $label = "$_...";
+		    	$label = "<b>$_...<\x03b>" if($xchat_ver[0]>=2 and $xchat_ver[1]>=6 and $xchat_ver[2]>=6);
+			command("MENU -m ADD \"$label\"");
+		    } else {
+			command("MENU -e0 ADD \"$_\"");
+		    }
+		}
+	}
+	if( $Pref{'tabindicator'} ) {
+		my $labelpre = (scalar @indicatee) ? "[".join(',', map {/./;$&} @indicatee)."] " : '';
+		command("SETTAB $labelpre ".get_info('channel'));
+	}
+}
+sub indicator_wrapper {
+	my %a = %{ $SESS{get_info('network')}->{get_info('channel')} };
+	indicator($a{'receive'}, $a{'transmit'});
+	return EAT_NONE;
 }
 
 
@@ -559,6 +606,17 @@ sub ctl {
 	}
 	elsif(/^(no)?auto$/) {
 		$Pref{'auto_neg'} = $1 ? 0 : 1;
+		save_pref;
+	}
+	elsif(/^indi/) {
+		if($_[0][2] =~ /^fake/i) {
+			$Pref{'indicator'} = 1; }
+		elsif($_[0][2] =~ /^menu/i) {
+			$Pref{'menuindicator'} = 1; }
+		elsif($_[0][2] =~ /^tab/i) {
+			$Pref{'tabindicator'} = 1; }
+		elsif($_[0][2] =~ /^no/i) {
+			$Pref{'indicator'} = $Pref{'menuindicator'} = $Pref{'tabindicator'} = 0; }
 		save_pref;
 	}
 	elsif(/^start$/) {

@@ -396,7 +396,7 @@ sub indicator {
 	}
 	if( $Pref{'tabindicator'} ) {
 		my $labelpre = (scalar @indicatee) ? "[".join(',', map {/./;$&} @indicatee)."] " : '';
-		command("SETTAB $labelpre ".get_info('channel'));
+		command("SETTAB ".$labelpre.get_info('channel'));
 	}
 }
 sub indicator_wrapper {
@@ -617,6 +617,12 @@ sub ctl {
 			$Pref{'tabindicator'} = 1; }
 		elsif($_[0][2] =~ /^no/i) {
 			$Pref{'indicator'} = $Pref{'menuindicator'} = $Pref{'tabindicator'} = 0; }
+		my @str;
+		push @str, "fake input" if $Pref{'indicator'};
+		push @str, "menu item" if $Pref{'menuindicator'};
+		push @str, "tab's label" if $Pref{'tabindicator'};
+		push @str, "none" unless scalar @str;
+		yell "Active status indicators: ".join', ',@str;
 		save_pref;
 	}
 	elsif(/^start$/) {

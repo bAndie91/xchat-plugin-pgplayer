@@ -9,17 +9,19 @@ use GnuPG::Tie::Encrypt;
 #use GnuPG::Tie::Decrypt;
 use Time::HiRes qw/gettimeofday/;
 use utf8;
-use Storable;
+use YAML qw/DumpFile LoadFile/;
 sub yell { Xchat::print("\cC08".$_[0]); }
 
 
-$VER = 0.7;
+$VER = '0.8';
 @xchat_ver = split/\./, get_info('version');
 yell "loading PGP layer plugin ver $VER";
 
-$conf_file = get_info('xchatdir')."/pgp-layer.conf";
-$Pref_ref = eval { retrieve($conf_file) };
-%Pref = %$Pref_ref   if ref $Pref_ref eq 'HASH';
+$conf_file = get_info('xchatdir')."/pgp-layer.yaml";
+if(-r $conf_file) {
+	$Pref_ref = LoadFile($conf_file);
+	%Pref = %$Pref_ref   if ref $Pref_ref eq 'HASH';
+}
 %Defaults = (
 	'MAXMSGLEN' => 400,	# 512 - length(overhead) # FIXME
 	'DEBUG' => 0,
@@ -29,6 +31,9 @@ $Pref_ref = eval { retrieve($conf_file) };
 	'key_servers' => [qw{
 		hkp://pgp.mit.edu
 	}],
+	'menuindicator' => 0,
+	'indicator' => 0,
+	'tabindicator' => 1,
 );
 for(keys%Defaults) { $Pref{$_} = $Defaults{$_} unless exists $Pref{$_} }
 $gpg_header = "-----BEGIN PGP MESSAGE-----\n";
@@ -54,24 +59,31 @@ push @Hooks, Xchat::hook_print("Your Message", \&cryptdata_filter);
 push @Hooks, Xchat::hook_print("Your Action", \&cryptdata_filter);
 push @Hooks, Xchat::hook_print("Private Message to Dialog", \&decrypt_filter);
 push @Hooks, Xchat::hook_print("Change Nick", \&change_name);
+# FIXME on exit close sess.
 push @Hooks, Xchat::hook_print("Your Nick Changing", \&change_name);
 $Help = <<EOF
-PGP SHOW [IDENT|COLOR|STAT]            show your and peer's identity,
-              color & formatting of pgp-layed messages and statictics
-    IDENT [keyID] [passphrase]         change your PGP identity by
-              secret GPG key, put "-" as keyID to drop your identity,
-              omit passphrase to get a prompt for it
-    [NO]AUTO  disalbe/enable auto negotiation when you QUERY somebody
-    INDIC [MENU|FAKE|TAB|NO]         set status indicator to be shown
-              MENU: in main menu, FAKE: as fake text in input field,
-              TAB: on tab's label, NO: disable all
-    START     initialize PGP session with a user
-    STOP      close session, switch back to cleartext
-    COLOR <code>   set format and color codes with which encrypted
-                   messages colored and formatted
-    CHAR <chr>     set UMODE character for pgp-layed messages
-    DUMP, [NO]DEBUG    print debug data (to stderr, next to messages)
-    SEND      internal use
+PGP <command> [parameters]
+ SHOW [IDENT|COLOR|STAT]
+        show your and peer's identity, color & formatting of pgp-layed messages
+        and statictics
+ IDENT [keyID] [passphrase]
+        change your PGP identity by secret GPG key, put "-" as keyID to drop your
+        identity, omit passphrase to get a prompt for it
+ [NO]AUTO       disable/enable auto negotiation when you QUERY somebody
+ INDIC [MENU | FAKE | TAB | NO]
+        set status indicator to be shown
+        MENU: in main menu
+        FAKE: as fake text in input field,
+        TAB: on tab's label
+        NO: disable all
+ START          initialize PGP session with a user
+ STOP           close session, switch back to cleartext
+ COLOR <code>   set format and color codes encrypted messages are colored and 
+                formatted with
+ CHAR <chr>     set UMODE char for pgp-layed messages (default ':')
+ DUMP           print debug data to stderr
+ [NO]DEBUG      print debug data next to messages
+ SEND           internal use
 http://code.google.com/p/xchat-plugin-pgplayer/wiki/Usage
 EOF
 ;
@@ -79,7 +91,9 @@ push @Hooks, Xchat::hook_command("PGP", \&ctl, { 'help_text' => $Help });
 
 
 
-sub save_pref { return store(\%Pref, $conf_file); }
+sub save_pref {
+	return DumpFile($conf_file, \%Pref);
+}
 sub key_exists {
 	my $keyid = shift;
 	my $secret = shift || 0;
@@ -110,7 +124,7 @@ sub gpg_key_list {
 	my $keyid, $created, $comment, $email, $realname, $expires;
 	my @list;
 	
-	open LIST, '-|', $GPG->{'gnupg_path'}, '--list'.($gettype==1?'-secret':'').'-keys', '--with-colon', '--no-tty'   or return undef;
+	open LIST, '-|', $GPG->{'gnupg_path'}, '--list'.($gettype==1?'-secret':'').'-keys', '--with-colon', '--no-tty', '--lock-never'   or return undef;
 	while(<LIST>) {
 		my ($type, $trust, $length, $algo, $keyid, $created, $expires, $any, $any, $userdata, $any) = split ':', $_;
 		next unless $type =~ /^sec|pub$/;
@@ -271,7 +285,7 @@ sub handshake_3 {
 			} else {
 				$SESS{$network}->{$partner}->{'key_id'} = undef;
 				$SESS{$network}->{$partner}->{'last_missing_pubkey_time'} = time;
-				yell "You haven't $partner"."'s public key: 0x$partner_key_id";
+				yell "You haven't $partner\x27s public key: 0x$partner_key_id";
 				# FIXME: fetch from keyserver, check fingerprints, set trust level
 			}
 			return EAT_ALL;
@@ -383,14 +397,18 @@ sub indicator {
 		command("SETCURSOR $cp");
 	}
 	if( $Pref{'menuindicator'} ) {
-		for my $i (qw/receive transmit/) {
-		    command("MENU DEL \"$_...\"");
-		    if(grep {$i eq $_} @indicatee) {
-		    	my $label = "$_...";
-		    	$label = "<b>$_...<\x03b>" if($xchat_ver[0]>=2 and $xchat_ver[1]>=6 and $xchat_ver[2]>=6);
-			command("MENU -m ADD \"$label\"");
-		    } else {
-			command("MENU -e0 ADD \"$_\"");
+		my %a = %{ $SESS{get_info('network')}->{get_info('channel')} };
+		for my $s (qw/receive transmit/) {
+		    command("MENU DEL \"$s...\"");
+		    command("MENU DEL \"$s\"");
+		    if($a->{'key_id'}) {
+		    	if(grep {$s eq $_} @indicatee) {
+		    		my $label = "$s...";
+		    		$label = "<b>$s...<\x03b>" if($xchat_ver[0]>=2 and $xchat_ver[1]>=6 and $xchat_ver[2]>=6);
+				command("MENU -m ADD \"$label\"");
+		    	} else {
+				command("MENU -e0 ADD \"$s\"");
+		    	}
 		    }
 		}
 	}
@@ -609,14 +627,17 @@ sub ctl {
 		save_pref;
 	}
 	elsif(/^indi/) {
-		if($_[0][2] =~ /^fake/i) {
+		while($_[0][2]) {
+		    if($_[0][2] =~ /^fake/i) {
 			$Pref{'indicator'} = 1; }
-		elsif($_[0][2] =~ /^menu/i) {
+		    elsif($_[0][2] =~ /^menu/i) {
 			$Pref{'menuindicator'} = 1; }
-		elsif($_[0][2] =~ /^tab/i) {
+		    elsif($_[0][2] =~ /^tab/i) {
 			$Pref{'tabindicator'} = 1; }
-		elsif($_[0][2] =~ /^no/i) {
+		    elsif($_[0][2] =~ /^no/i) {
 			$Pref{'indicator'} = $Pref{'menuindicator'} = $Pref{'tabindicator'} = 0; }
+		    shift @{$_[0]};
+		}
 		my @str;
 		push @str, "fake input" if $Pref{'indicator'};
 		push @str, "menu item" if $Pref{'menuindicator'};
